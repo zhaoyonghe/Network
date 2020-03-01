@@ -4,6 +4,7 @@ import select
 import sys
 import os
 from datetime import datetime
+import time
 
 BUFF_SIZE = 2048
 
@@ -16,38 +17,61 @@ def sendToServer(toServerSocket, requestPath):
 	print(requestToServer)
 	toServerSocket.send(requestToServer.encode())
 
+def waitForSocketReadable(skt, name):
+	count = 0
+	while count < 301:
+		readable, _, _ = select.select([skt], [], [], 0)
+		if readable:
+			break
+		if count % 50 == 0:
+			print("waiting for the " + name + " to become readable..... count = " + str(count))
+		count += 1
+		time.sleep(0.01)
+
 def receiveFromServer(toServerSocket):
 	# Receive message from socket
-	# Returns a tuple rawResponse, responseCode, indicator, responseBody
+	# Returns a tuple rawResponse(byte), responseCode, indicator, responseBody(byte)
 	# Uses nonblocking select call (timeout=0)
+	waitForSocketReadable(toServerSocket, "toServerSocket")
+
+	readable, _, _ = select.select([toServerSocket], [], [], 0)
+	if not readable:
+		# error
+		return None, None, None, None
+
 	rawResponse = bytearray()
+	# First receive the top part of the message, including status line and header lines 
 	indicator = toServerSocket.recv(BUFF_SIZE)
 	rawResponse.extend(indicator)
 	print(indicator)
 
+	# Get the entire content length of this response message
 	indicator = indicator.decode(errors='ignore')
 	pattern = re.compile(r'(?<=Content-Length: )\d+')
 	lenList = pattern.findall(indicator)
 	if len(lenList) == 0:
+		# If we cannot find the content length in the header lines
 		responseCode = indicator.split(" ", 2)[1]
-		return rawResponse, responseCode, indicator
+		responseBody = rawResponse.split(b'\r\n\r\n')[1]
+		return rawResponse, responseCode, indicator, responseBody
 
 	n = lenList[0]
-	print(type(n))
-	print(n)
+	print("Content-Length: " + n)
+	# Recieve all the content
 	while int(n) > len(rawResponse):
 		packet = toServerSocket.recv(int(n))
 		if not packet:
 			break
 		#print(packet)
 		rawResponse.extend(packet)
-	#rawResponse = toServerSocket.recv(1024 * 1024 * 1000)
-	print("Receive from server:\n")
-	print(rawResponse)
+
+	#print("Receive from server:\n")
+	#print(rawResponse)
+
 	responseCode = indicator.split(" ", 2)[1]
 	responseBody = rawResponse.split(b'\r\n\r\n')[1]
-
 	return rawResponse, responseCode, indicator, responseBody
+
 
 '''
 clientMessage should be some thing like this:
@@ -81,6 +105,28 @@ def getDomainAndPath(clientMessage):
 		return None, None
 
 	domain, path = getDomainAndPathFromURL(request)
+
+	# Referer
+	pattern = re.compile(r'(?<=Referer: )\S+')
+	refererList = pattern.findall(clientMessage)
+	goodPath = None
+	if len(refererList) > 0:
+		print("-----------------------")
+		print(refererList[0])
+		goodPath = refererList[0].split(domain)[-1]
+
+	if goodPath is not None and len(goodPath) > 0:
+		pathList = path.split("/")
+		goodPathList = goodPath.split("/")
+
+		i = 0
+		while i < len(pathList) and i < len(goodPathList):
+			if pathList[i] != goodPathList[i]:
+				break
+			i += 1
+
+		goodPathList.extend(pathList[i:])
+		path = "/".join(goodPathList)
 
 	return domain, path
 
@@ -154,6 +200,7 @@ def main():
 	proxySocket.listen(5) # what is the listen??
 	print("The proxy is ready to receive from client...")
 
+	# The current domain that the client is requesting
 	curDomain = None
 
 	while True:
@@ -165,15 +212,17 @@ def main():
 		# Accept a connection
 		clientSocket, clientAddr = proxySocket.accept()
 
+		waitForSocketReadable(clientSocket, "clientSocket")
+
 		readable, _, _ = select.select([clientSocket], [], [], 0)
 		if readable:
-			# Receive 1024 bytes from client
+			# Receive 2048 bytes from client
 			clientMessage = clientSocket.recv(BUFF_SIZE).decode(errors="ignore")
 
-			# Parse requests
+			# Parse the request
 			domain, path = getDomainAndPath(clientMessage)
 			if domain is None and path is None:
-				clientSocket.close()
+				clientSocket.close()  # close socket to wait for new request
 				continue
 
 			print("\nClient message : \n****\n" + clientMessage + "\n****\n" )
@@ -182,19 +231,18 @@ def main():
 				domain = curDomain
 
 			curDomain = domain
-			'''
+			
 			# check the cache
 			hit, rawResponse = checkCache(domain, path, False)
 			if hit:
 				print("cache hit..............................................")
 				clientSocket.send(rawResponse)
-				clientSocket.close()
+				clientSocket.close()  # close socket to wait for new request
 				continue
-			'''
-			# cache miss, request the server
+			
 
+			# cache miss, request the server
 			toServerSocket = connectToServer(domain, serverPort)
-			#body, responseLine = checkCache(sysPath, path, domain, serverPort)
 
 			# Send the request to server
 			sendToServer(toServerSocket, path)
@@ -204,7 +252,7 @@ def main():
 
 			if code == "200":
 				print("200 save to cache")
-				#saveCache(domain, path, responseBody)
+				saveCache(domain, path, responseBody)
 			elif code == "404":
 				print("404 do nothing")
 			elif code == "301":
@@ -221,14 +269,29 @@ def main():
 				print("redirect to:")
 				print(newDomain)
 				print(newPath)
+
+				# check the cache
+				hit, rawResponse = checkCache(newDomain, newPath, False)
+				if hit:
+					print("cache hit..............................................")
+					clientSocket.send(rawResponse)
+					clientSocket.close()  # close socket to wait for new request
+					continue
+
 				toServerSocket = connectToServer(newDomain, serverPort)
 				sendToServer(toServerSocket, newPath)
 				rawResponse, code, indicator, responseBody = receiveFromServer(toServerSocket)
 				# TODO save cache
+				saveCache(newDomain, newPath, responseBody)
 			else:
 				print("=====================================")
-				print("this will not happen............")
+				print("This will not happen with high probability............")
 				print("=====================================")
+				clientSocket.close()  # close socket to wait for new request
+				toServerSocket.close()
+				continue
+
+
 			#print("From Server:", str(file))     
 
 			# send the modified message to the client
@@ -237,6 +300,7 @@ def main():
 			#print(addStatusLine(responseBody))
 			clientSocket.send(addStatusLine(responseBody))
 			clientSocket.close()  # close socket to wait for new request
+			toServerSocket.close() # close
 		else:
 			# Or other error handling 
 			clientSocket.close()
