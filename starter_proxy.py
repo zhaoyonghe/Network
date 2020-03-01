@@ -197,7 +197,7 @@ def main():
 	# Create a proxy socket to listen from the client
 	proxySocket = socket(AF_INET,SOCK_STREAM)
 	proxySocket.bind(('localhost', proxyPort))
-	proxySocket.listen(5) # what is the listen??
+	proxySocket.listen(1) # what is the listen??
 	print("The proxy is ready to receive from client...")
 
 	# The current domain that the client is requesting
