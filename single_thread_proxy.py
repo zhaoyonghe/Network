@@ -5,12 +5,8 @@ import sys
 import os
 from datetime import datetime
 import time
-import threading
 
 BUFF_SIZE = 2048
-serverPort = 80
-# The current domain that the client is requesting
-curDomain = None
 
 # For example, it will send something like this:
 # GET /~ge2211/4119/test1/www.google.com/index.html HTTP/1.0\r\n\r\n
@@ -190,109 +186,10 @@ def connectToServer(serverName, serverPort):
 	print("The proxy has connected to the server...")
 	return toServerSocket
 
-def handler(clientSocket, clientAddr, threadNum):
-	print("###########################################")
-	print("Thread " + str(threadNum) + " is running!")
-	print("###########################################")
-	global curDomain
-	global serverPort
-
-	waitForSocketReadable(clientSocket, "clientSocket")
-
-	readable, _, _ = select.select([clientSocket], [], [], 0)
-	if readable:
-		# Receive 2048 bytes from client
-		clientMessage = clientSocket.recv(BUFF_SIZE).decode(errors="ignore")
-
-		# Parse the request
-		domain, path = getDomainAndPath(clientMessage)
-		if domain is None and path is None:
-			clientSocket.close()  # close socket to wait for new request
-			return
-
-		print("\nClient message : \n****\n" + clientMessage + "\n****\n" )
-
-		if domain is None and path == "/favicon.ico" and curDomain is not None:
-			domain = curDomain
-		
-		curDomain = domain
-		print(domain)
-		print(curDomain)
-		
-		# check the cache
-		hit, rawResponse = checkCache(domain, path, False)
-		if hit:
-			print("cache hit..............................................")
-			clientSocket.send(rawResponse)
-			clientSocket.close()  # close socket to wait for new request
-			return
-		
-		# cache miss, request the server
-		toServerSocket = connectToServer(domain, serverPort)
-
-		# Send the request to server
-		sendToServer(toServerSocket, path)
-
-		# receive the response from server
-		rawResponse, code, indicator, responseBody = receiveFromServer(toServerSocket)
-
-		if code == "200":
-			print("200 save to cache")
-			saveCache(domain, path, responseBody)
-		elif code == "404":
-			print("404 do nothing")
-		elif code == "301":
-			print("301 redirect")
-			pattern = re.compile(r'(?<=Location: )\S+')
-			print("-----------------------")
-			print(pattern.findall(indicator)[0])
-			redirectedPath = pattern.findall(indicator)[0]
-			newDomain, newPath = None, None
-			if redirectedPath[0:7] == "http://":
-				newDomain, newPath = getDomainAndPathFromURL(redirectedPath[6:])
-			else:
-				newDomain, newPath = getDomainAndPathFromURL(redirectedPath)
-			print("redirect to:")
-			print(newDomain)
-			print(newPath)
-
-			# check the cache
-			hit, rawResponse = checkCache(newDomain, newPath, False)
-			if hit:
-				print("cache hit..............................................")
-				clientSocket.send(rawResponse)
-				clientSocket.close()  # close socket to wait for new request
-				return
-
-			toServerSocket = connectToServer(newDomain, serverPort)
-			sendToServer(toServerSocket, newPath)
-			rawResponse, code, indicator, responseBody = receiveFromServer(toServerSocket)
-			# TODO save cache
-			saveCache(newDomain, newPath, responseBody)
-		else:
-			print("=====================================")
-			print("This will not happen with high probability............")
-			print("=====================================")
-			clientSocket.close()  # close socket to wait for new request
-			toServerSocket.close()
-			return
-		
-		#print("From Server:", str(file))     
-
-		# send the modified message to the client
-		print("cache miss..............................................")
-		print("to client")
-		#print(addStatusLine(responseBody))
-		clientSocket.send(addStatusLine(responseBody))
-		clientSocket.close()  # close socket to wait for new request
-		toServerSocket.close() # close
-	else:
-		# Or other error handling 
-		clientSocket.close()
-
-
 def main():
 	count = 0
+
+	serverPort = 80
 	
 	proxyPort = 8080 # default proxy port
 	if len(sys.argv) > 1:
@@ -301,8 +198,11 @@ def main():
 	# Create a proxy socket to listen from the client
 	proxySocket = socket(AF_INET,SOCK_STREAM)
 	proxySocket.bind(('localhost', proxyPort))
-	proxySocket.listen(5) # what is the listen??
+	proxySocket.listen(1) # what is the listen??
 	print("The proxy is ready to receive from client...")
+
+	# The current domain that the client is requesting
+	curDomain = None
 
 	while True:
 		count += 1
@@ -313,9 +213,98 @@ def main():
 		# Accept a connection
 		clientSocket, clientAddr = proxySocket.accept()
 
-		t = threading.Thread(target = handler, args=(clientSocket, clientAddr, count,))
-		t.start()
+		waitForSocketReadable(clientSocket, "clientSocket")
 
+		readable, _, _ = select.select([clientSocket], [], [], 0)
+		if readable:
+			# Receive 2048 bytes from client
+			clientMessage = clientSocket.recv(BUFF_SIZE).decode(errors="ignore")
+
+			# Parse the request
+			domain, path = getDomainAndPath(clientMessage)
+			if domain is None and path is None:
+				clientSocket.close()  # close socket to wait for new request
+				continue
+
+			print("\nClient message : \n****\n" + clientMessage + "\n****\n" )
+
+			if domain is None and path == "/favicon.ico" and curDomain is not None:
+				domain = curDomain
+
+			curDomain = domain
+			
+			# check the cache
+			hit, rawResponse = checkCache(domain, path, False)
+			if hit:
+				print("cache hit..............................................")
+				clientSocket.send(rawResponse)
+				clientSocket.close()  # close socket to wait for new request
+				continue
+			
+
+			# cache miss, request the server
+			toServerSocket = connectToServer(domain, serverPort)
+
+			# Send the request to server
+			sendToServer(toServerSocket, path)
+
+			# receive the response from server
+			rawResponse, code, indicator, responseBody = receiveFromServer(toServerSocket)
+
+			if code == "200":
+				print("200 save to cache")
+				saveCache(domain, path, responseBody)
+			elif code == "404":
+				print("404 do nothing")
+			elif code == "301":
+				print("301 redirect")
+				pattern = re.compile(r'(?<=Location: )\S+')
+				print("-----------------------")
+				print(pattern.findall(indicator)[0])
+				redirectedPath = pattern.findall(indicator)[0]
+				newDomain, newPath = None, None
+				if redirectedPath[0:7] == "http://":
+					newDomain, newPath = getDomainAndPathFromURL(redirectedPath[6:])
+				else:
+					newDomain, newPath = getDomainAndPathFromURL(redirectedPath)
+				print("redirect to:")
+				print(newDomain)
+				print(newPath)
+
+				# check the cache
+				hit, rawResponse = checkCache(newDomain, newPath, False)
+				if hit:
+					print("cache hit..............................................")
+					clientSocket.send(rawResponse)
+					clientSocket.close()  # close socket to wait for new request
+					continue
+
+				toServerSocket = connectToServer(newDomain, serverPort)
+				sendToServer(toServerSocket, newPath)
+				rawResponse, code, indicator, responseBody = receiveFromServer(toServerSocket)
+				# TODO save cache
+				saveCache(newDomain, newPath, responseBody)
+			else:
+				print("=====================================")
+				print("This will not happen with high probability............")
+				print("=====================================")
+				clientSocket.close()  # close socket to wait for new request
+				toServerSocket.close()
+				continue
+
+
+			#print("From Server:", str(file))     
+
+			# send the modified message to the client
+			print("cache miss..............................................")
+			print("to client")
+			#print(addStatusLine(responseBody))
+			clientSocket.send(addStatusLine(responseBody))
+			clientSocket.close()  # close socket to wait for new request
+			toServerSocket.close() # close
+		else:
+			# Or other error handling 
+			clientSocket.close()
 
 	proxySocket.close()
 
