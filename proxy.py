@@ -313,6 +313,7 @@ def main():
 		# Accept a connection
 		clientSocket, clientAddr = proxySocket.accept()
 
+		# Start a new thread to handle the new request
 		t = threading.Thread(target = handler, args=(clientSocket, clientAddr, count,))
 		t.start()
 
